@@ -14,7 +14,7 @@
 //!
 //! ```
 //! use std::sync::{Arc, Mutex};
-//! use lock_ext::LockExt;
+//! use poisoned::LockExt;
 //!
 //! let shared = Arc::new(Mutex::new(0_i32));
 //! *shared.lock().or_panic() += 1;
@@ -24,7 +24,7 @@
 //!
 //! ```
 //! use std::sync::Mutex;
-//! use lock_ext::LockExt;
+//! use poisoned::LockExt;
 //!
 //! let name = "config".to_string();
 //! let cache = Mutex::new(vec![1, 2, 3]);
