@@ -1,0 +1,12 @@
+[package]
+name = "lock-ext"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Fail-fast for poisoned std locks: an or_panic() extension trait"
+license = "MIT"
+keywords = ["mutex", "rwlock", "poison", "panic", "fail-fast"]
+categories = ["concurrency"]
+repository = "https://github.com/abhishekshree/lock-ext"
+
+[dependencies]
