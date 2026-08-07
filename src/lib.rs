@@ -6,9 +6,12 @@
 //! panic: explicit, greppable, and clippy-clean.
 //!
 //! Unlike `Result::unwrap`, [`LockExt::or_panic`] also handles the unwinding
-//! case. Locking a poisoned lock from a [`Drop`] impl while the stack is
-//! already unwinding would otherwise trigger a double panic that aborts the
-//! process. The guard is recovered via [`PoisonError::into_inner`] instead.
+//! case. This matters when a [`Drop`] impl locks a shared [`Mutex`] or
+//! [`RwLock`] while cleaning up, e.g. releasing a pooled connection or
+//! flushing metrics. Locking a poisoned lock from a `Drop` impl while the
+//! stack is already unwinding would otherwise trigger a double panic that
+//! aborts the process. The guard is recovered via
+//! [`PoisonError::into_inner`] instead.
 //!
 //! # Examples
 //!

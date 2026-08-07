@@ -12,11 +12,12 @@ When a thread panics while holding a [`std::sync::Mutex`] or
 `lock()`, `read()`, or `write()` returns a `PoisonError`. This crate's
 `or_panic()` turns that into a panic: explicit, greppable, and clippy-clean.
 
-Unlike `.unwrap()`, `or_panic()` also handles the unwinding case. If a
-poisoned lock is locked from a `Drop` impl while the stack is already
-unwinding, a naive panic triggers a double panic that aborts the process.
-`or_panic()` detects this via `std::thread::panicking()` and recovers the
-guard instead.
+Unlike `.unwrap()`, `or_panic()` also handles the unwinding case. This
+matters if any `Drop` impl in your codebase locks a shared `Mutex`/`RwLock`
+while unwinding, e.g. releasing a pooled connection or flushing metrics on
+cleanup. If that lock is poisoned, a naive panic triggers a double panic
+that aborts the process. `or_panic()` detects this via
+`std::thread::panicking()` and recovers the guard instead.
 
 ## Usage
 
@@ -44,6 +45,32 @@ The trait is implemented for every `Result<T, PoisonError<T>>`, so it covers:
 - `Mutex::lock()`, `RwLock::read()`, `RwLock::write()`
 - `Mutex::into_inner()`, `RwLock::into_inner()`
 - the `get_mut()` variants
+
+The double-panic case, e.g. flushing metrics from a `Drop` impl while
+unwinding. The `unwrap()` version aborts the process if the lock is
+poisoned:
+
+```rust
+impl Drop for FlushOnDrop {
+    fn drop(&mut self) {
+        // If this lock is poisoned mid-unwind, this panics again and the
+        // process aborts with a double panic.
+        self.metrics.lock().unwrap().push(7);
+    }
+}
+```
+
+With `or_panic()` the guard is recovered instead:
+
+```rust
+use poisoned::LockExt;
+
+impl Drop for FlushOnDrop {
+    fn drop(&mut self) {
+        self.metrics.lock().or_panic().push(7);
+    }
+}
+```
 
 ## How it behaves
 
