@@ -1,5 +1,10 @@
 # poisoned
 
+[![Crates.io](https://img.shields.io/crates/v/poisoned)](https://crates.io/crates/poisoned)
+[![Docs.rs](https://docs.rs/poisoned/badge.svg)](https://docs.rs/poisoned)
+[![CI](https://github.com/abhishekshree/poisoned/actions/workflows/ci.yml/badge.svg)](https://github.com/abhishekshree/poisoned/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/crates/l/poisoned)](LICENSE)
+
 Fail-fast for poisoned `std` locks.
 
 When a thread panics while holding a [`std::sync::Mutex`] or
