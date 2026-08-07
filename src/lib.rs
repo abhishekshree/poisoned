@@ -53,11 +53,21 @@
 #![warn(missing_docs)]
 #![warn(clippy::all, clippy::pedantic)]
 
+use std::fmt::Display;
 use std::sync::PoisonError;
 
 /// The default panic message used by [`LockExt::or_panic`].
 const DEFAULT_PANIC_MESSAGE: &str =
     "lock is poisoned: a previous holder panicked while holding the guard";
+
+mod private {
+    /// Restricts [`LockExt`](crate::LockExt) to the blanket implementation in
+    /// this crate so downstream crates cannot implement it for their own types.
+    #[doc(hidden)]
+    pub trait Sealed {}
+}
+
+impl<T> private::Sealed for Result<T, PoisonError<T>> {}
 
 /// Extension trait for fail-fast handling of poisoned locks.
 ///
@@ -66,7 +76,9 @@ const DEFAULT_PANIC_MESSAGE: &str =
 /// [`Mutex::into_inner`](std::sync::Mutex::into_inner),
 /// [`RwLock::read`](std::sync::RwLock::read) and
 /// [`RwLock::write`](std::sync::RwLock::write) return on error.
-pub trait LockExt<T> {
+///
+/// This trait is *sealed*: it cannot be implemented outside this crate.
+pub trait LockExt<T>: private::Sealed {
     /// Return the inner value, or panic if the lock is poisoned.
     ///
     /// # Panics
@@ -88,19 +100,19 @@ pub trait LockExt<T> {
     /// panic.
     #[track_caller]
     #[must_use]
-    fn or_panic_with(self, message: impl FnOnce() -> String) -> T;
+    fn or_panic_with<M: Display>(self, message: impl FnOnce() -> M) -> T;
 }
 
 impl<T> LockExt<T> for Result<T, PoisonError<T>> {
     #[track_caller]
     #[inline]
     fn or_panic(self) -> T {
-        self.or_panic_with(|| DEFAULT_PANIC_MESSAGE.to_owned())
+        self.or_panic_with(|| DEFAULT_PANIC_MESSAGE)
     }
 
     #[track_caller]
     #[inline]
-    fn or_panic_with(self, message: impl FnOnce() -> String) -> T {
+    fn or_panic_with<M: Display>(self, message: impl FnOnce() -> M) -> T {
         match self {
             Ok(value) => value,
             Err(poisoned) => {
