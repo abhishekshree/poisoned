@@ -1,31 +1,14 @@
-//! Fail-fast handling for poisoned standard-library locks.
+//! Fail-fast handling for poisoned [`std::sync`] locks.
 //!
-//! The [`LockExt`] extension trait converts a [`PoisonError`] from the
-//! locking methods of [`std::sync::Mutex`] and [`std::sync::RwLock`] into a
-//! panic. A poisoned lock means a previous holder panicked mid critical
-//! section, so the guarded data may be in an inconsistent state — in most
-//! programs that is a hard failure you want to surface immediately rather
-//! than limp along on.
+//! When a thread panics while holding a [`Mutex`] or [`RwLock`] guard, the
+//! lock becomes poisoned and every subsequent `lock`/`read`/`write` returns a
+//! [`PoisonError`]. This crate's [`LockExt`] trait converts that error into a
+//! panic: explicit, greppable, and clippy-clean.
 //!
-//! # Why not just `.unwrap()`?
-//!
-//! `Result::unwrap` on a poisoned lock also panics, but:
-//!
-//! - It is indistinguishable from the many unrelated `.unwrap()` calls in a
-//!   codebase. `or_panic()` makes the fail-fast intent explicit and greppable.
-//! - It ignores [`std::thread::panicking()`]. If a poisoned lock is locked
-//!   from a [`Drop`] implementation while the stack is already unwinding,
-//!   `.unwrap()` triggers a *double panic*, which aborts the process.
-//!   `or_panic()` detects that case and recovers the guard via
-//!   [`PoisonError::into_inner`] instead.
-//!
-//! # Relationship to upstream Rust
-//!
-//! Tracking issue
-//! [rust-lang/rust#149359](https://github.com/rust-lang/rust/issues/149359)
-//! proposes making `std::sync` locks panic on poison by default (and adding
-//! non-poisoning variants), possibly at the 2027 edition boundary. Until that
-//! lands, this crate is the explicit fail-fast shim.
+//! Unlike `Result::unwrap`, [`LockExt::or_panic`] also handles the unwinding
+//! case. Locking a poisoned lock from a [`Drop`] impl while the stack is
+//! already unwinding would otherwise trigger a double panic that aborts the
+//! process. The guard is recovered via [`PoisonError::into_inner`] instead.
 //!
 //! # Examples
 //!
@@ -48,6 +31,9 @@
 //! let first = cache.lock().or_panic_with(|| format!("cache lock poisoned for {name}"));
 //! assert_eq!(first[0], 1);
 //! ```
+//!
+//! [`Mutex`]: std::sync::Mutex
+//! [`RwLock`]: std::sync::RwLock
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -69,35 +55,39 @@ mod private {
 
 impl<T> private::Sealed for Result<T, PoisonError<T>> {}
 
-/// Extension trait for fail-fast handling of poisoned locks.
+/// Extension trait that converts a poisoned lock result into a panic.
 ///
-/// Implemented for every `Result<T, PoisonError<T>>`, which is what
-/// [`Mutex::lock`](std::sync::Mutex::lock),
-/// [`Mutex::into_inner`](std::sync::Mutex::into_inner),
-/// [`RwLock::read`](std::sync::RwLock::read) and
-/// [`RwLock::write`](std::sync::RwLock::write) return on error.
+/// Implemented for every `Result<T, PoisonError<T>>`, which is what the
+/// fallible methods of [`Mutex`] and [`RwLock`] return: `lock`, `read`,
+/// `write`, `get_mut`, and `into_inner`.
 ///
-/// This trait is *sealed*: it cannot be implemented outside this crate.
+/// Sealed: cannot be implemented outside this crate.
+///
+/// [`Mutex`]: std::sync::Mutex
+/// [`RwLock`]: std::sync::RwLock
 pub trait LockExt<T>: private::Sealed {
-    /// Return the inner value, or panic if the lock is poisoned.
+    /// Returns the inner value, or panics if the lock is poisoned.
+    ///
+    /// While the current thread is already unwinding, recovers the guard via
+    /// [`PoisonError::into_inner`] instead of panicking, avoiding a double
+    /// panic.
     ///
     /// # Panics
     ///
     /// Panics if the lock is poisoned and the current thread is not already
-    /// panicking. While unwinding, the guard is recovered instead, so the
-    /// panic is not turned into a process-aborting double panic.
+    /// panicking.
     #[track_caller]
     #[must_use]
     fn or_panic(self) -> T;
 
-    /// Like [`or_panic`](Self::or_panic), with a custom, lazily built message.
+    /// Like [`or_panic`](Self::or_panic), with a custom message.
+    ///
+    /// `message` is evaluated only if the lock is poisoned.
     ///
     /// # Panics
     ///
     /// Panics with `message()` if the lock is poisoned and the current thread
-    /// is not already panicking. While unwinding, the guard is recovered
-    /// instead, so the panic is not turned into a process-aborting double
-    /// panic.
+    /// is not already panicking.
     #[track_caller]
     #[must_use]
     fn or_panic_with<M: Display>(self, message: impl FnOnce() -> M) -> T;

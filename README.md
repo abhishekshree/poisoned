@@ -3,14 +3,15 @@
 Fail-fast for poisoned `std` locks.
 
 When a thread panics while holding a [`std::sync::Mutex`] or
-[`std::sync::RwLock`] guard, the lock becomes *poisoned*: every subsequent
-`lock()` / `read()` / `write()` returns a `PoisonError`. In practice that
-usually means the world is already broken, so you want to fail fast — but the
-plain `Result`/`unwrap()` dance makes that intent invisible, and it gets the
-double-panic case wrong.
+[`std::sync::RwLock`] guard, the lock becomes poisoned and every subsequent
+`lock()`, `read()`, or `write()` returns a `PoisonError`. This crate's
+`or_panic()` turns that into a panic: explicit, greppable, and clippy-clean.
 
-This crate provides `or_panic()` — an explicit, greppable, clippy-clean
-fail-fast that also handles the unwinding case correctly.
+Unlike `.unwrap()`, `or_panic()` also handles the unwinding case. If a
+poisoned lock is locked from a `Drop` impl while the stack is already
+unwinding, a naive panic triggers a double panic that aborts the process.
+`or_panic()` detects this via `std::thread::panicking()` and recovers the
+guard instead.
 
 ## Usage
 
@@ -41,17 +42,11 @@ The trait is implemented for every `Result<T, PoisonError<T>>`, so it covers:
 
 ## How it behaves
 
-| Lock state                  | Thread panicking? | Result                                             |
-| --------------------------- | ----------------- | -------------------------------------------------- |
-| Not poisoned                | any               | returns the guard, same as `Ok(...)`               |
-| Poisoned                    | no                | `panic!` with the message (fail-fast)              |
-| Poisoned                    | yes (unwinding)   | recovers the guard via `PoisonError::into_inner()` |
-
-The last row is the reason this is not just `.unwrap()` with a fancy name: if a
-poisoned lock is locked from a `Drop` implementation while the stack is already
-unwinding, a naive panic triggers a **double panic**, which aborts the whole
-process. `or_panic()` detects that via `std::thread::panicking()` and recovers
-the guard instead.
+| Lock state                | Thread panicking? | Result                                            |
+| ------------------------- | ----------------- | ------------------------------------------------- |
+| Not poisoned              | any               | returns the guard, same as `Ok(...)`              |
+| Poisoned                  | no                | panics with the message (fail-fast)               |
+| Poisoned                  | yes (unwinding)   | recovers the guard via `PoisonError::into_inner()` |
 
 ## Why it exists
 
