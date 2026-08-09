@@ -5,13 +5,13 @@
 //! [`PoisonError`]. This crate's [`LockExt`] trait converts that error into a
 //! panic: explicit, greppable, and clippy-clean.
 //!
-//! Unlike `Result::unwrap`, [`LockExt::or_panic`] also handles the unwinding
-//! case. This matters when a [`Drop`] impl locks a shared [`Mutex`] or
-//! [`RwLock`] while cleaning up, e.g. releasing a pooled connection or
-//! flushing metrics. Locking a poisoned lock from a `Drop` impl while the
-//! stack is already unwinding would otherwise trigger a double panic that
-//! aborts the process. The guard is recovered via
-//! [`PoisonError::into_inner`] instead.
+//! `or_panic()` does **not** special-case unwinding: if you call it from a
+//! [`Drop`] impl while the stack is already unwinding and the lock is
+//! poisoned, it panics like any other panic, which aborts the process with a
+//! double panic. This is the same as `Result::unwrap` and is intentional —
+//! recovery via `std::thread::panicking()` was removed in 1.1.0. If a `Drop`
+//! impl must tolerate a poisoned lock, catch the panic explicitly with
+//! [`std::panic::catch_unwind`].
 //!
 //! # Examples
 //!
@@ -71,14 +71,9 @@ impl<T> private::Sealed for Result<T, PoisonError<T>> {}
 pub trait LockExt<T>: private::Sealed {
     /// Returns the inner value, or panics if the lock is poisoned.
     ///
-    /// While the current thread is already unwinding, recovers the guard via
-    /// [`PoisonError::into_inner`] instead of panicking, avoiding a double
-    /// panic.
-    ///
     /// # Panics
     ///
-    /// Panics if the lock is poisoned and the current thread is not already
-    /// panicking.
+    /// Panics if the lock is poisoned.
     #[track_caller]
     #[must_use]
     fn or_panic(self) -> T;
@@ -89,8 +84,7 @@ pub trait LockExt<T>: private::Sealed {
     ///
     /// # Panics
     ///
-    /// Panics with `message()` if the lock is poisoned and the current thread
-    /// is not already panicking.
+    /// Panics with `message()` if the lock is poisoned.
     #[track_caller]
     #[must_use]
     fn or_panic_with<M: Display>(self, message: impl FnOnce() -> M) -> T;
@@ -106,16 +100,11 @@ impl<T> LockExt<T> for Result<T, PoisonError<T>> {
     #[track_caller]
     #[inline]
     fn or_panic_with<M: Display>(self, message: impl FnOnce() -> M) -> T {
-        match self {
-            Ok(value) => value,
-            Err(poisoned) => {
-                if std::thread::panicking() {
-                    poisoned.into_inner()
-                } else {
-                    let message = message();
-                    panic!("{message}");
-                }
-            }
+        if let Ok(value) = self {
+            value
+        } else {
+            let message = message();
+            panic!("{message}");
         }
     }
 }
@@ -200,11 +189,14 @@ mod tests {
     }
 
     #[test]
-    fn recovers_during_unwind_instead_of_aborting() {
+    fn panics_during_unwind() {
         struct LockOnDrop(Arc<Mutex<i32>>);
         impl Drop for LockOnDrop {
             fn drop(&mut self) {
-                let _guard = self.0.lock().or_panic();
+                let caught = catch_unwind(|| {
+                    let _guard = self.0.lock().or_panic();
+                });
+                assert!(caught.is_err(), "or_panic must panic during unwinding");
             }
         }
 

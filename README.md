@@ -12,12 +12,12 @@ When a thread panics while holding a [`std::sync::Mutex`] or
 `lock()`, `read()`, or `write()` returns a `PoisonError`. This crate's
 `or_panic()` turns that into a panic: explicit, greppable, and clippy-clean.
 
-Unlike `.unwrap()`, `or_panic()` also handles the unwinding case. This
-matters if any `Drop` impl in your codebase locks a shared `Mutex`/`RwLock`
-while unwinding, e.g. releasing a pooled connection or flushing metrics on
-cleanup. If that lock is poisoned, a naive panic triggers a double panic
-that aborts the process. `or_panic()` detects this via
-`std::thread::panicking()` and recovers the guard instead.
+`or_panic()` does **not** special-case unwinding. Calling it on a poisoned
+lock from a `Drop` impl while the stack is already unwinding panics like any
+other panic, which aborts the process with a double panic — the same as
+`.unwrap()`. Recovery via `std::thread::panicking()` was removed in 1.1.0; if
+a `Drop` impl must tolerate a poisoned lock, catch the panic explicitly with
+`std::panic::catch_unwind`.
 
 ## Usage
 
@@ -46,9 +46,9 @@ The trait is implemented for every `Result<T, PoisonError<T>>`, so it covers:
 - `Mutex::into_inner()`, `RwLock::into_inner()`
 - the `get_mut()` variants
 
-The double-panic case, e.g. flushing metrics from a `Drop` impl while
-unwinding. The `unwrap()` version aborts the process if the lock is
-poisoned:
+The double-panic trap, e.g. flushing metrics from a `Drop` impl while
+unwinding. Both the `.unwrap()` version and the `or_panic()` version abort
+the process if the lock is poisoned:
 
 ```rust
 impl Drop for FlushOnDrop {
@@ -60,25 +60,27 @@ impl Drop for FlushOnDrop {
 }
 ```
 
-With `or_panic()` the guard is recovered instead:
+To keep the process alive, catch the panic explicitly. The guard is dropped
+normally if the lock is healthy, so only the poisoned case panics:
 
 ```rust
-use poisoned::LockExt;
+use std::panic::catch_unwind;
 
 impl Drop for FlushOnDrop {
     fn drop(&mut self) {
-        self.metrics.lock().or_panic().push(7);
+        let _ = catch_unwind(|| {
+            self.metrics.lock().or_panic().push(7);
+        });
     }
 }
 ```
 
 ## How it behaves
 
-| Lock state                | Thread panicking? | Result                                            |
-| ------------------------- | ----------------- | ------------------------------------------------- |
-| Not poisoned              | any               | returns the guard, same as `Ok(...)`              |
-| Poisoned                  | no                | panics with the message (fail-fast)               |
-| Poisoned                  | yes (unwinding)   | recovers the guard via `PoisonError::into_inner()` |
+| Lock state                | Result                                            |
+| ------------------------- | ------------------------------------------------- |
+| Not poisoned              | returns the guard, same as `Ok(...)`              |
+| Poisoned                  | panics with the message (fail-fast)               |
 
 ## Why it exists
 

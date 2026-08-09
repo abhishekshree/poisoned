@@ -1,6 +1,6 @@
 [package]
 name = "poisoned"
-version = "1.0.0"
+version = "1.1.0"
 edition = "2024"
 rust-version = "1.85"
 description = "Fail-fast for poisoned std locks: an or_panic() extension trait"
