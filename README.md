@@ -10,14 +10,7 @@ Fail-fast for poisoned `std` locks.
 When a thread panics while holding a [`std::sync::Mutex`] or
 [`std::sync::RwLock`] guard, the lock becomes poisoned and every subsequent
 `lock()`, `read()`, or `write()` returns a `PoisonError`. This crate's
-`or_panic()` turns that into a panic: explicit, greppable, and clippy-clean.
-
-`or_panic()` does **not** special-case unwinding. Calling it on a poisoned
-lock from a `Drop` impl while the stack is already unwinding panics like any
-other panic, which aborts the process with a double panic — the same as
-`.unwrap()`. Recovery via `std::thread::panicking()` was removed in 1.1.0; if
-a `Drop` impl must tolerate a poisoned lock, catch the panic explicitly with
-`std::panic::catch_unwind`.
+`or_panic()` turns that into a panic.
 
 ## Usage
 
@@ -29,7 +22,8 @@ let shared = Arc::new(Mutex::new(0_i32));
 *shared.lock().or_panic() += 1;
 ```
 
-A custom message, built lazily:
+A custom message, built lazily. The closure receives the `PoisonError`, so it
+can inspect the recovered data:
 
 ```rust
 use std::sync::Mutex;
@@ -37,7 +31,19 @@ use poisoned::LockExt;
 
 let name = "config".to_string();
 let cache = Mutex::new(vec![1, 2, 3]);
-let first = cache.lock().or_panic_with(|| format!("cache lock poisoned for {name}"));
+let first = cache
+    .lock()
+    .or_panic_with(|_| format!("cache lock poisoned for {name}"));
+```
+
+Recover explicitly, repairing the value first:
+
+```rust
+use std::sync::Mutex;
+use poisoned::LockExt;
+
+let shared = Mutex::new(vec![1, 2, 3]);
+shared.lock().or_recover(|cache| cache.clear());
 ```
 
 The trait is implemented for every `Result<T, PoisonError<T>>`, so it covers:
@@ -77,10 +83,10 @@ impl Drop for FlushOnDrop {
 
 ## How it behaves
 
-| Lock state                | Result                                            |
-| ------------------------- | ------------------------------------------------- |
-| Not poisoned              | returns the guard, same as `Ok(...)`              |
-| Poisoned                  | panics with the message (fail-fast)               |
+| Method               | Not poisoned      | Poisoned                                             |
+| -------------------- | ----------------- | ---------------------------------------------------- |
+| `or_panic*`          | returns the guard | panics with the message (fail-fast)                  |
+| `or_recover(repair)` | returns the guard | recovers the value, runs `repair`, then returns it   |
 
 ## Why it exists
 

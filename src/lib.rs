@@ -1,17 +1,8 @@
 //! Fail-fast handling for poisoned [`std::sync`] locks.
 //!
 //! When a thread panics while holding a [`Mutex`] or [`RwLock`] guard, the
-//! lock becomes poisoned and every subsequent `lock`/`read`/`write` returns a
-//! [`PoisonError`]. This crate's [`LockExt`] trait converts that error into a
-//! panic: explicit, greppable, and clippy-clean.
-//!
-//! `or_panic()` does **not** special-case unwinding: if you call it from a
-//! [`Drop`] impl while the stack is already unwinding and the lock is
-//! poisoned, it panics like any other panic, which aborts the process with a
-//! double panic. This is the same as `Result::unwrap` and is intentional —
-//! recovery via `std::thread::panicking()` was removed in 1.1.0. If a `Drop`
-//! impl must tolerate a poisoned lock, catch the panic explicitly with
-//! [`std::panic::catch_unwind`].
+//! lock is poisoned and every subsequent `lock`/`read`/`write` returns a
+//! [`PoisonError`]. [`LockExt::or_panic`] turns that error into a panic.
 //!
 //! # Examples
 //!
@@ -31,7 +22,7 @@
 //!
 //! let name = "config".to_string();
 //! let cache = Mutex::new(vec![1, 2, 3]);
-//! let first = cache.lock().or_panic_with(|| format!("cache lock poisoned for {name}"));
+//! let first = cache.lock().or_panic_with(|_| format!("cache lock poisoned for {name}"));
 //! assert_eq!(first[0], 1);
 //! ```
 //!
@@ -78,33 +69,60 @@ pub trait LockExt<T>: private::Sealed {
     #[must_use]
     fn or_panic(self) -> T;
 
-    /// Like [`or_panic`](Self::or_panic), with a custom message.
+    /// Like [`or_panic`](Self::or_panic), with a custom message built from
+    /// the [`PoisonError`].
     ///
-    /// `message` is evaluated only if the lock is poisoned.
+    /// `message` receives the [`PoisonError`], so it can inspect the recovered
+    /// data via [`PoisonError::get_ref`]. It is evaluated only if the lock is
+    /// poisoned.
     ///
     /// # Panics
     ///
-    /// Panics with `message()` if the lock is poisoned.
+    /// Panics with `message(&error)` if the lock is poisoned.
     #[track_caller]
     #[must_use]
-    fn or_panic_with<M: Display>(self, message: impl FnOnce() -> M) -> T;
+    fn or_panic_with<M: Display>(self, message: impl FnOnce(&PoisonError<T>) -> M) -> T;
+
+    /// Returns the inner value, repairing it first if the lock is poisoned.
+    ///
+    /// On a poisoned lock, the value is recovered via [`PoisonError::into_inner`]
+    /// and `repair` is called on it before it is returned, so the caller can
+    /// restore it to a consistent state. A healthy lock is returned as-is and
+    /// `repair` is not called.
+    #[track_caller]
+    #[must_use]
+    fn or_recover(self, repair: impl FnOnce(&mut T)) -> T;
 }
 
 impl<T> LockExt<T> for Result<T, PoisonError<T>> {
     #[track_caller]
     #[inline]
     fn or_panic(self) -> T {
-        self.or_panic_with(|| DEFAULT_PANIC_MESSAGE)
+        self.or_panic_with(|_| DEFAULT_PANIC_MESSAGE)
     }
 
     #[track_caller]
     #[inline]
-    fn or_panic_with<M: Display>(self, message: impl FnOnce() -> M) -> T {
-        if let Ok(value) = self {
-            value
-        } else {
-            let message = message();
-            panic!("{message}");
+    fn or_panic_with<M: Display>(self, message: impl FnOnce(&PoisonError<T>) -> M) -> T {
+        match self {
+            Ok(value) => value,
+            Err(error) => {
+                let message = message(&error);
+                panic!("{message}");
+            }
+        }
+    }
+
+    #[track_caller]
+    #[inline]
+    fn or_recover(self, repair: impl FnOnce(&mut T)) -> T {
+        match self {
+            Ok(value) => value,
+            Err(error) => {
+                let mut value = error.into_inner();
+                repair(&mut value);
+                value
+            }
         }
     }
 }
@@ -170,8 +188,9 @@ mod tests {
         let mutex = Mutex::new(0);
         poison(&mutex);
 
-        let payload = catch_unwind(|| mutex.lock().or_panic_with(|| "custom fail-fast".to_owned()))
-            .expect_err("should panic");
+        let payload =
+            catch_unwind(|| mutex.lock().or_panic_with(|_| "custom fail-fast".to_owned()))
+                .expect_err("should panic");
         let message = payload
             .downcast_ref::<String>()
             .expect("panic payload should be a String");
@@ -179,13 +198,56 @@ mod tests {
     }
 
     #[test]
+    fn message_can_read_data_from_error() {
+        let mutex = Mutex::new(7);
+        poison(&mutex);
+
+        let payload = catch_unwind(|| {
+            mutex.lock().or_panic_with(|error| format!("data was {}", **error.get_ref()))
+        })
+        .expect_err("should panic");
+        let message = payload
+            .downcast_ref::<String>()
+            .expect("panic payload should be a String");
+        assert_eq!(message, "data was 7");
+    }
+
+    #[test]
     fn message_is_built_lazily() {
         let mutex = Mutex::new(0);
 
-        let guard = mutex.lock().or_panic_with(|| {
+        let guard = mutex.lock().or_panic_with(|_| {
             panic!("message closure must not run when the lock is healthy");
         });
         assert_eq!(*guard, 0);
+    }
+
+    #[test]
+    fn or_recover_skips_repair_when_healthy() {
+        let mutex = Mutex::new(7);
+
+        let guard = mutex.lock().or_recover(|_| {
+            panic!("repair must not run when the lock is healthy");
+        });
+        assert_eq!(*guard, 7);
+    }
+
+    #[test]
+    fn or_recover_repairs_poisoned_guard() {
+        let mutex = Mutex::new(7);
+        poison(&mutex);
+
+        let guard = mutex.lock().or_recover(|guard| **guard = 0);
+        assert_eq!(*guard, 0);
+    }
+
+    #[test]
+    fn or_recover_repairs_poisoned_value() {
+        let mutex = Mutex::new(7);
+        poison(&mutex);
+
+        let value = mutex.into_inner().or_recover(|value| *value = 9);
+        assert_eq!(value, 9);
     }
 
     #[test]
@@ -217,5 +279,50 @@ mod tests {
 
         assert!(result.is_err());
         assert_eq!(*shared.lock().unwrap_or_else(PoisonError::into_inner), 7);
+    }
+
+    #[test]
+    fn or_panic_during_unwind_aborts() {
+        const HELPER_ENV: &str = "POISONED_DOUBLE_PANIC_HELPER";
+
+        if std::env::var_os(HELPER_ENV).is_some() {
+            struct LockOnDrop(Arc<Mutex<i32>>);
+            impl Drop for LockOnDrop {
+                fn drop(&mut self) {
+                    let _guard = self.0.lock().or_panic();
+                }
+            }
+
+            let shared = Arc::new(Mutex::new(7));
+            let shared_2 = Arc::clone(&shared);
+            let _ = catch_unwind(move || {
+                let _guard = shared_2.lock().unwrap();
+                panic!("poison it");
+            });
+            assert!(shared.is_poisoned());
+
+            let accessor = LockOnDrop(Arc::clone(&shared));
+            let _ = catch_unwind(move || {
+                let _held = accessor;
+                panic!("unwind here");
+            });
+
+            // The `or_panic` in `Drop` runs while unwinding and must abort the
+            // process before this point. Exiting normally means it did not.
+            std::process::exit(0);
+        }
+
+        let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+            .arg("--exact")
+            .arg("tests::or_panic_during_unwind_aborts")
+            .env(HELPER_ENV, "1")
+            .output()
+            .expect("run double-panic helper");
+
+        assert!(
+            output.status.code().is_none(),
+            "or_panic in a Drop while unwinding must abort the process, got {:?}",
+            output.status
+        );
     }
 }
