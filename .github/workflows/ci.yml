@@ -29,7 +29,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
-      - uses: dtolnay/rust-cache@v2
+      - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --all-targets --all-features -- -D warnings
 
   test:
@@ -37,7 +37,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
-      - uses: dtolnay/rust-cache@v2
+      - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@v2
         with:
           tool: nextest
@@ -50,6 +50,6 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.85.0
-      - uses: dtolnay/rust-cache@v2
+      - uses: Swatinem/rust-cache@v2
       - run: cargo build --all-features
       - run: cargo test --all-features
