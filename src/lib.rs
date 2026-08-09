@@ -188,9 +188,12 @@ mod tests {
         let mutex = Mutex::new(0);
         poison(&mutex);
 
-        let payload =
-            catch_unwind(|| mutex.lock().or_panic_with(|_| "custom fail-fast".to_owned()))
-                .expect_err("should panic");
+        let payload = catch_unwind(|| {
+            mutex
+                .lock()
+                .or_panic_with(|_| "custom fail-fast".to_owned())
+        })
+        .expect_err("should panic");
         let message = payload
             .downcast_ref::<String>()
             .expect("panic payload should be a String");
@@ -203,7 +206,9 @@ mod tests {
         poison(&mutex);
 
         let payload = catch_unwind(|| {
-            mutex.lock().or_panic_with(|error| format!("data was {}", **error.get_ref()))
+            mutex
+                .lock()
+                .or_panic_with(|error| format!("data was {}", **error.get_ref()))
         })
         .expect_err("should panic");
         let message = payload
