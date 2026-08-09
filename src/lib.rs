@@ -55,10 +55,14 @@ impl<T> private::Sealed for Result<T, PoisonError<T>> {}
 /// fallible methods of [`Mutex`] and [`RwLock`] return: `lock`, `read`,
 /// `write`, `get_mut`, and `into_inner`.
 ///
+/// The `try_*` methods are not covered: they return a [`TryLockError`] whose
+/// `WouldBlock` variant is not a poison condition.
+///
 /// Sealed: cannot be implemented outside this crate.
 ///
 /// [`Mutex`]: std::sync::Mutex
 /// [`RwLock`]: std::sync::RwLock
+/// [`TryLockError`]: std::sync::TryLockError
 pub trait LockExt<T>: private::Sealed {
     /// Returns the inner value, or panics if the lock is poisoned.
     ///
@@ -89,6 +93,12 @@ pub trait LockExt<T>: private::Sealed {
     /// and `repair` is called on it before it is returned, so the caller can
     /// restore it to a consistent state. A healthy lock is returned as-is and
     /// `repair` is not called.
+    ///
+    /// Recovery is per-acquisition: the lock stays poisoned and later calls
+    /// still return `Err`. A `lock()` guard derefs to its
+    /// [`Mutex`](std::sync::Mutex), so `repair` can clear the flag with
+    /// [`Mutex::clear_poison`](std::sync::Mutex::clear_poison) to resume
+    /// normal use.
     #[track_caller]
     #[must_use]
     fn or_recover(self, repair: impl FnOnce(&mut T)) -> T;
@@ -132,7 +142,7 @@ mod tests {
     use std::panic::catch_unwind;
     use std::sync::{Arc, Mutex, PoisonError, RwLock};
 
-    use super::{DEFAULT_PANIC_MESSAGE, LockExt};
+    use super::*;
 
     fn poison(mutex: &Mutex<i32>) {
         let _ = catch_unwind(|| {
@@ -256,6 +266,32 @@ mod tests {
     }
 
     #[test]
+    fn or_recover_repairs_poisoned_rwlock() {
+        let lock = RwLock::new(vec![1, 2, 3]);
+        let _ = catch_unwind(|| {
+            let _guard = lock.write().unwrap();
+            panic!("poison it");
+        });
+        assert!(lock.is_poisoned());
+
+        let guard = lock.write().or_recover(|guard| guard.clear());
+        assert!(guard.is_empty());
+    }
+
+    #[test]
+    fn or_recover_keeps_lock_poisoned() {
+        let mutex = Mutex::new(7);
+        poison(&mutex);
+
+        let guard = mutex.lock().or_recover(|guard| **guard = 0);
+        assert_eq!(*guard, 0);
+        drop(guard);
+
+        assert!(mutex.is_poisoned());
+        assert!(mutex.lock().is_err());
+    }
+
+    #[test]
     fn panics_during_unwind() {
         struct LockOnDrop(Arc<Mutex<i32>>);
         impl Drop for LockOnDrop {
@@ -289,8 +325,9 @@ mod tests {
     #[test]
     fn or_panic_during_unwind_aborts() {
         const HELPER_ENV: &str = "POISONED_DOUBLE_PANIC_HELPER";
+        const CHILD_ENV: &str = "POISONED_DOUBLE_PANIC_CHILD";
 
-        if std::env::var_os(HELPER_ENV).is_some() {
+        if std::env::var_os(HELPER_ENV).is_some() && std::env::var_os(CHILD_ENV).is_some() {
             struct LockOnDrop(Arc<Mutex<i32>>);
             impl Drop for LockOnDrop {
                 fn drop(&mut self) {
@@ -321,11 +358,15 @@ mod tests {
             .arg("--exact")
             .arg("tests::or_panic_during_unwind_aborts")
             .env(HELPER_ENV, "1")
+            .env(CHILD_ENV, "1")
             .output()
             .expect("run double-panic helper");
 
+        // The helper exits 0 only if it survived without aborting, and the only
+        // non-success exit path is the double-panic abort, so this holds on
+        // both Unix (signal death) and Windows (error exit code).
         assert!(
-            output.status.code().is_none(),
+            !output.status.success(),
             "or_panic in a Drop while unwinding must abort the process, got {:?}",
             output.status
         );
